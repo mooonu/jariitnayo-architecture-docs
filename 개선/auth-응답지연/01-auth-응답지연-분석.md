@@ -2,7 +2,7 @@
 
 [2026.06.19]
 
-
+<br>
 
 ## 0. 요약
 
@@ -10,7 +10,7 @@
 - 원인은 httpx 의 클라이언트 초기화 + https 엔드포인트로 인해 5초정도의 병목이 발생
 - httpx -> http.client 로 변경. `_verify_apple_token` / `_verify_kakao_token` / `_fetch_apple_refresh_token` 3곳 모두 교체하고 `import httpx` 제거
 
-
+<br>
 
 ## 1. 문제 상황
 
@@ -30,13 +30,15 @@ START=-604800s END=0s
 
 결과: **지난 1주일간 8초 이상 케이스 4건. 모두 Apple 신규 회원가입 요청.**
 
+<br>
+
 ### 추가 조사
 
 Kakao 신규 회원가입 요청에 대한 실행시간도 조사하였음.
 
 결과: **Kakao 신규 회원가입 요청도 6.5초 수준의 지연 관찰**
 
-
+<br>
 
 ## 2. 원인 분석
 
@@ -54,6 +56,8 @@ Kakao 신규 회원가입 요청에 대한 실행시간도 조사하였음.
 - **6,157ms - 코드 상 `_verify_apple_token` 구간**
 - 1,415ms - 코드 상 `_fetch_apple_refresh_token` 구간 (신규 가입에만 발생)
 
+<br>
+
 ### 병목 구간 코드 분석
 
 lambda/auth/handler.py 조사
@@ -67,6 +71,8 @@ def _verify_apple_token(identity_token: str, user_identifier: str):
 
 외부 HTTPS를 호출하는 유일한 네트워크 I/O인 `httpx.get()` 을 **원인으로 의심**
 
+<br>
+
 ### 가설
 
 #### 비슷한 응답지연 분석 사례
@@ -74,11 +80,13 @@ def _verify_apple_token(identity_token: str, user_identifier: str):
 2026-06-07 에 비슷한 cold start 응답지연 분석이 있었고, 외부 API를 호출하는 람다 함수가 cold start 시 평균 2,443ms 응답 지연을 보였다. 원인은 httpx 클라이언트 초기화 오버헤드였다.
 따라서 이번 원인도 **동일하게 클라이언트 초기화 오버헤드로 의심**된다
 
-
+<br>
 
 ## 3. 테스트
 
 가설 검증을 위해 두 라이브러리를 격리하여 테스트를 진행한다.
+
+<br>
 
 ### 테스트 결과
 
@@ -125,9 +133,11 @@ REPORT  Duration 2,664ms  Init 790ms
 
 -> **원인은 cold start 시 httpx 클라이언트 초기화로 인한 병목**이 발생하는 것.
 
-
+<br>
 
 ## 4. 해결
+
+<br>
 
 ### 검토한 대안
 
@@ -136,6 +146,8 @@ REPORT  Duration 2,664ms  Init 790ms
 | SSM Parameter Store 캐싱 | Apple JWKS 호출 자체 제거 | boto3 cold 비용 ~1초로 효과 미미 (test 람다 측정 결과 **0.1초 차이**) | 기각 |
 | 모듈 메모리 캐시 | 첫 호출 외 fetch 0 | auth는 사실상 100% cold start (유저당 최초 1회 또는 30일 만료 후 1회 호출) | 기각 |
 | **`http.client` 교체** | 클라이언트 초기화 제거. 코드 변경 최소. | - | **채택** |
+
+<br>
 
 ### 채택
 

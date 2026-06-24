@@ -2,7 +2,7 @@
 
 [2026.06.02 / 최종 수정 2026.06.07]
 
-
+<br>
 
 ## 0. 요약
 
@@ -10,7 +10,7 @@
 - 원인은 **`httpx` 클라이언트 초기화 오버헤드**
 - httpx -> http.client 로 교체. 대상: `get_train`, `get_nearby_arrival`, `pass_seat`
 
-
+<br>
 
 ## 1. 문제 상황
 
@@ -45,13 +45,17 @@ filter @type = "REPORT"
 
 **결과: cold start에서만 ~2,400ms 추가 지연 발생, warm 상태는 정상.**
 
-
+<br>
 
 ## 2. 원인 분석
+
+<br>
 
 ### 초기 가설 - TCP 소켓 재초기화
 
 Cold start 시 Python 람다의 네트워크 소켓이 새로 초기화되면서, 첫 번째 외부 HTTP 연결(서울시 API)이 TCP 핸드셰이크부터 시작되어 응답 지연이 발생하는 것으로 추정.
+
+<br>
 
 ### 가설 검증 도구 선택
 
@@ -64,6 +68,8 @@ HTTP 요청의 어느 구간(DNS / TCP / TLS / TTFB / transfer)에서 시간이 
 | `http.client` (표준 라이브러리) | `socket` + `http.client`에 `time.perf_counter()`로 구간별 직접 측정 | **채택** |
 
 테스트 람다 제작, `http.client`로 구간별 측정.
+
+<br>
 
 ### 측정 결과 - 가설 전환
 
@@ -78,15 +84,19 @@ HTTP 요청의 어느 구간(DNS / TCP / TLS / TTFB / transfer)에서 시간이 
 Init Duration은 거의 동일한데 **HTTP 구간만 매번 ~2,400ms 차이**. 두 함수의 차이는 HTTP 라이브러리뿐 
 → **가설 전환: TCP 소켓 재초기화가 아니라 `httpx` 패키지 자체의 초기화 오버헤드가 원인.**
 
+<br>
+
 ### httpx vs http.client 차이
 
 `httpx.get(url)`은 호출할 때마다 내부적으로 HTTP 클라이언트 인스턴스, Connection Pool, Transport 레이어, 타임아웃/헤더/리다이렉트 기본값을 **매번 새로 생성**한다. Warm 상태에서는 라이브러리가 메모리에 있어 이 비용이 작지만, cold start에서는 Python 프로세스가 새로 뜨면서 httpx 임포트 + 클라이언트 초기화가 합쳐져 ~2,400ms가 발생.
 
 `http.client`는 Python 표준 라이브러리로 임포트 비용이 거의 없고, 클라이언트 객체 없이 소켓을 직접 열어 요청하는 구조라 초기화 비용이 거의 없음.
 
-
+<br>
 
 ## 3. 테스트
+
+<br>
 
 ### 최종 검증 - get_train 로직 + http.client
 
@@ -103,6 +113,8 @@ START RequestId: b38bcf7c  timestamp: 1780843656801
 REPORT Duration: 68.42 ms  Init Duration: 588.39 ms
 ```
 
+<br>
+
 ### 결과 비교
 
 | 항목 | get_train (httpx) | network_probe (http.client) |
@@ -114,9 +126,11 @@ REPORT Duration: 68.42 ms  Init Duration: 588.39 ms
 → Cold Start임에도 HTTP 구간이 66ms로 warm 수준과 동일. 필터링·응답 로직도 정상 동작.
 → **가설 확정: `httpx` 클라이언트 초기화 오버헤드가 cold start 응답지연의 실질적 원인.**
 
-
+<br>
 
 ## 4. 해결
+
+<br>
 
 ### 검토한 대안
 
@@ -126,6 +140,8 @@ REPORT Duration: 68.42 ms  Init Duration: 588.39 ms
 | Provisioned Concurrency | cold 완전 제거 | 추가 비용 발생 (~$0.015/GB-시간). 대안 4로 해결 가능해 불필요 | 기각 |
 | Lambda SnapStart | Init Duration 단축 | httpx 초기화 오버헤드(~2,400ms)는 해결 안 됨. 핵심 문제 미해결 | 기각 |
 | **`http.client` 교체** | **httpx 초기화 ~2,400ms 제거. 추가 비용 0** | - | **채택** |
+
+<br>
 
 ### 채택
 
